@@ -4,33 +4,101 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const https = require('https');
 const http = require('http');
 const socketIo = require('socket.io');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
-const server = http.createServer(app);
 
-// CORS configuration
+// HTTPS Configuration
+let server;
+let httpsOptions = {};
+
+if (process.env.NODE_ENV === 'production') {
+  // Production HTTPS configuration
+  try {
+    httpsOptions = {
+      key: fs.readFileSync(process.env.SSL_KEY_PATH || '/path/to/your/private-key.pem'),
+      cert: fs.readFileSync(process.env.SSL_CERT_PATH || '/path/to/your/certificate.pem'),
+      // Optional: Add intermediate certificate if you have one
+      // ca: fs.readFileSync(process.env.SSL_CA_PATH || '/path/to/your/ca-bundle.pem')
+    };
+    server = https.createServer(httpsOptions, app);
+    console.log('HTTPS server configured for production');
+  } catch (error) {
+    console.error('Error loading SSL certificates:', error);
+    console.log('Falling back to HTTP server');
+    server = http.createServer(app);
+  }
+} else {
+  // Development: Use HTTP or self-signed certificates
+  if (process.env.USE_HTTPS_DEV === 'true') {
+    try {
+      // Generate self-signed certificates for development
+      // You can create these using: openssl req -x509 -newkey rsa:4096 -keyout dev-key.pem -out dev-cert.pem -days 365 -nodes
+      httpsOptions = {
+        key: fs.readFileSync(path.join(__dirname, 'certs', 'dev-key.pem')),
+        cert: fs.readFileSync(path.join(__dirname, 'certs', 'dev-cert.pem'))
+      };
+      server = https.createServer(httpsOptions, app);
+      console.log('HTTPS server configured for development with self-signed certificates');
+    } catch (error) {
+      console.log('Self-signed certificates not found, using HTTP for development');
+      server = http.createServer(app);
+    }
+  } else {
+    server = http.createServer(app);
+  }
+}
+
+// CORS configuration - Updated for HTTPS
 const corsOptions = {
   origin: [
-    'http://localhost:3000',
-    'https://papakha.in',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:8080'
+    "https://chatriox.com", "https://www.chatriox.com"
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-client-id', 'x-client-secret']
 };
 
-// Middleware
+// Enhanced security middleware for HTTPS
 app.use(cors(corsOptions));
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
-  contentSecurityPolicy: false
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https:"],
+      scriptSrc: ["'self'", "https:"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "https:", "wss:"],
+      fontSrc: ["'self'", "https:", "data:"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
 }));
+
+// Force HTTPS in production
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.header('x-forwarded-proto') !== 'https') {
+      res.redirect(`https://${req.header('host')}${req.url}`);
+    } else {
+      next();
+    }
+  });
+}
+
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -118,7 +186,7 @@ const validateEmailContent = (req, res, next) => {
 };
 
 // Apply email content validation
-app.use('/api/templatess', validateEmailContent);
+app.use('/api/templates', validateEmailContent);
 
 // Template backup and versioning
 const createTemplateBackup = async (templateId, userId) => {
@@ -178,7 +246,9 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    protocol: req.protocol,
+    secure: req.secure
   });
 });
 
@@ -201,13 +271,14 @@ app.use('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+const HTTPS_PORT = process.env.HTTPS_PORT || 443;
 
-// Initialize Socket.IO
+// Initialize Socket.IO with HTTPS support
 const io = socketIo(server, {
   cors: {
     origin: process.env.NODE_ENV === 'production' 
-      ? ['https://papakha.in'] 
-      : ['http://localhost:3000', 'http://localhost:5173'],
+['https://chatriox.com', "https://www.chatriox.com"] ,
+
     credentials: true
   }
 });
@@ -229,10 +300,16 @@ io.on('connection', (socket) => {
   });
 });
 
+// Start server
+const actualPort = process.env.NODE_ENV === 'production' 
+  ? (server instanceof https.Server ? HTTPS_PORT : PORT)
+  : PORT;
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+server.listen(actualPort, () => {
+  const protocol = server instanceof https.Server ? 'https' : 'http';
+  console.log(`Server running on ${protocol}://localhost:${actualPort}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Protocol: ${protocol.toUpperCase()}`);
   console.log(`MongoDB URI: ${process.env.MONGODB_URI || 'mongodb://localhost:27017/marketing_dashboard'}`);
 });
 
